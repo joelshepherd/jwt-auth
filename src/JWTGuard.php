@@ -13,11 +13,14 @@ namespace Tymon\JWTAuth;
 
 use BadMethodCallException;
 use Illuminate\Http\Request;
+use Illuminate\Auth\Events;
 use Illuminate\Auth\GuardHelpers;
 use Illuminate\Contracts\Auth\Guard;
 use Tymon\JWTAuth\Contracts\JWTSubject;
 use Tymon\JWTAuth\Exceptions\JWTException;
 use Illuminate\Contracts\Auth\UserProvider;
+use Illuminate\Contracts\Auth\Authenticatable as AuthenticatableContract;
+use Illuminate\Contracts\Events\Dispatcher;
 use Tymon\JWTAuth\Exceptions\UserNotDefinedException;
 
 class JWTGuard implements Guard
@@ -44,6 +47,13 @@ class JWTGuard implements Guard
      * @var \Illuminate\Http\Request
      */
     protected $request;
+
+    /**
+     * The event dispatcher instance.
+     *
+     * @var \Illuminate\Contracts\Events\Dispatcher
+     */
+    protected $events;
 
     /**
      * Instantiate the class.
@@ -76,8 +86,11 @@ class JWTGuard implements Guard
             ($payload = $this->jwt->check(true)) &&
             $this->validateSubject()
         ) {
-            return $this->user = $this->provider->retrieveById($payload['sub']);
+            $this->user = $this->provider->retrieveById($payload['sub']);
+            $this->fireAuthenticatedEvent($this->user);
         }
+
+        return $this->user;
     }
 
     /**
@@ -118,10 +131,20 @@ class JWTGuard implements Guard
      */
     public function attempt(array $credentials = [], $login = true)
     {
+        // Only fire attempted if the user is trying to login.
+        if ($login) {
+            $this->fireAttemptEvent($credentials);
+        }
+
         $this->lastAttempted = $user = $this->provider->retrieveByCredentials($credentials);
 
         if ($this->hasValidCredentials($user, $credentials)) {
             return $login ? $this->login($user) : true;
+        }
+
+        // Only fire failed if the user is trying to login.
+        if ($login) {
+            $this->fireFailedEvent($user, $credentials);
         }
 
         return false;
@@ -139,6 +162,8 @@ class JWTGuard implements Guard
         $token = $this->jwt->fromUser($user);
         $this->setToken($token)->setUser($user);
 
+        $this->fireLoginEvent($user);
+
         return $token;
     }
 
@@ -152,6 +177,8 @@ class JWTGuard implements Guard
     public function logout($forceForever = false)
     {
         $this->requireToken()->invalidate($forceForever);
+
+        $this->fireLogoutEvent($this->user);
 
         $this->user = null;
         $this->jwt->unsetToken();
@@ -205,6 +232,8 @@ class JWTGuard implements Guard
      */
     public function once(array $credentials = [])
     {
+        $this->fireAttemptEvent($credentials);
+
         if ($this->validate($credentials)) {
             $this->setUser($this->lastAttempted);
 
@@ -257,6 +286,22 @@ class JWTGuard implements Guard
 
         return $this;
     }
+
+    /**
+     * Set the current user.
+     *
+     * @param  \Illuminate\Contracts\Auth\Authenticatable  $user
+     * @return $this
+     */
+    public function setUser(AuthenticatableContract $user)
+    {
+        $this->user = $user;
+
+        $this->fireAuthenticatedEvent($user);
+
+        return $this;
+    }
+
 
     /**
      * Get the raw Payload instance.
@@ -365,6 +410,27 @@ class JWTGuard implements Guard
     }
 
     /**
+     * Get the event dispatcher instance.
+     *
+     * @return \Illuminate\Contracts\Events\Dispatcher
+     */
+    public function getDispatcher()
+    {
+        return $this->events;
+    }
+
+    /**
+     * Set the event dispatcher instance.
+     *
+     * @param  \Illuminate\Contracts\Events\Dispatcher  $events
+     * @return void
+     */
+    public function setDispatcher(Dispatcher $events)
+    {
+        $this->events = $events;
+    }
+
+    /**
      * Get the last user we attempted to authenticate.
      *
      * @return \Illuminate\Contracts\Auth\Authenticatable
@@ -417,6 +483,76 @@ class JWTGuard implements Guard
         }
 
         return $this->jwt;
+    }
+
+    /**
+     * Fire the attempt event with the arguments.
+     *
+     * @param  array  $credentials
+     * @param  bool  $remember
+     * @return void
+     */
+    protected function fireAttemptEvent(array $credentials, $remember = false)
+    {
+        if (isset($this->events)) {
+            $this->events->dispatch(new Events\Attempting(
+                $credentials, $remember
+            ));
+        }
+    }
+
+    /**
+     * Fire the login event if the dispatcher is set.
+     *
+     * @param  \Illuminate\Contracts\Auth\Authenticatable  $user
+     * @param  bool  $remember
+     * @return void
+     */
+    protected function fireLoginEvent($user, $remember = false)
+    {
+        if (isset($this->events)) {
+            $this->events->dispatch(new Events\Login($user, $remember));
+        }
+    }
+
+    /**
+     * Fire the login event if the dispatcher is set.
+     *
+     * @param  \Illuminate\Contracts\Auth\Authenticatable  $user
+     * @return void
+     */
+    protected function fireLogoutEvent($user)
+    {
+        if (isset($this->events)) {
+            $this->events->dispatch(new Events\Logout($user));
+        }
+    }
+
+    /**
+     * Fire the authenticated event if the dispatcher is set.
+     *
+     * @param  \Illuminate\Contracts\Auth\Authenticatable  $user
+     * @return void
+     */
+    protected function fireAuthenticatedEvent($user)
+    {
+        if (isset($this->events)) {
+            $this->events->dispatch(new Events\Authenticated($user));
+        }
+    }
+
+    /**
+     * Fire the failed authentication attempt event with the given arguments.
+     *
+     * @param  \Illuminate\Contracts\Auth\Authenticatable|null  $user
+     * @param  array  $credentials
+     * @return void
+     */
+    protected function fireFailedEvent($user, array $credentials)
+    {
+        if (isset($this->events)) {
+            $this->events->dispatch(new Events\Failed($user, $credentials));
+        }
     }
 
     /**

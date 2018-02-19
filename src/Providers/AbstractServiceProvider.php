@@ -104,6 +104,8 @@ abstract class AbstractServiceProvider extends ServiceProvider
 
             $app->refresh('request', $guard, 'setRequest');
 
+            $guard->setDispatcher($this->app['events']);
+
             return $guard;
         });
     }
